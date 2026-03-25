@@ -1,0 +1,9 @@
+opencv-python
+numpy
+pandas
+tqdm
+scikit-learn
+pyyaml
+python-dotenv
+requests
+matplotlib
