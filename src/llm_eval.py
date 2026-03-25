@@ -21,9 +21,12 @@ class LLMSafetyEvaluator:
 
     def __init__(self, prompt_template_path: str):
         self.prompt_template_path = prompt_template_path
+        self.backend = os.getenv("LLM_BACKEND", "api").strip().lower()
         self.api_key = os.getenv("LLM_API_KEY", "").strip()
         self.base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.model = os.getenv("LLM_MODEL", "gpt-4.1-mini")
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
         self.max_images = int(os.getenv("LLM_MAX_IMAGES", "24"))
         self.image_detail = os.getenv("LLM_IMAGE_DETAIL", "low")
 
@@ -31,7 +34,11 @@ class LLMSafetyEvaluator:
         self.template = template
 
     def is_enabled(self) -> bool:
-        return bool(self.api_key)
+        if self.backend in {"api", "openai_compatible"}:
+            return bool(self.api_key)
+        if self.backend == "ollama":
+            return True
+        return False
 
     @staticmethod
     def _encode_image_base64(image_path: str) -> str:
@@ -112,8 +119,28 @@ class LLMSafetyEvaluator:
             }
 
         prompt = self._build_prompt(video_path, keyframes, rule_context=rule_context)
-        url = f"{self.base_url}/chat/completions"
+        if self.backend in {"api", "openai_compatible"}:
+            text = self._evaluate_openai_compatible(prompt, ordered_images, timeout)
+        elif self.backend == "ollama":
+            text = self._evaluate_ollama(prompt, ordered_images, timeout)
+        else:
+            raise RuntimeError(f"不支持的 LLM_BACKEND: {self.backend}")
 
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # 兜底: 尝试提取第一个 JSON 对象
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                parsed = json.loads(text[start : end + 1])
+            else:
+                raise
+
+        return parsed
+
+    def _evaluate_openai_compatible(self, prompt: str, ordered_images: list[str], timeout: int) -> str:
+        url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -151,17 +178,33 @@ class LLMSafetyEvaluator:
         resp = requests.post(url, headers=headers, json=body, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
-        text = data["choices"][0]["message"]["content"].strip()
+        return str(data["choices"][0]["message"]["content"]).strip()
 
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            # 兜底: 尝试提取第一个 JSON 对象
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                parsed = json.loads(text[start : end + 1])
-            else:
-                raise
+    def _evaluate_ollama(self, prompt: str, ordered_images: list[str], timeout: int) -> str:
+        url = f"{self.ollama_base_url}/api/chat"
+        images_b64 = [self._encode_image_base64(p) for p in ordered_images]
 
-        return parsed
+        body = {
+            "model": self.ollama_model,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是自动驾驶视频安全评测专家。你将收到按时间排序的多帧图像，只输出有效JSON。",
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": images_b64,
+                },
+            ],
+            "options": {
+                "temperature": 0,
+            },
+        }
+
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return str(data.get("message", {}).get("content", "")).strip()

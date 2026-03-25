@@ -96,23 +96,44 @@ python run_pipeline.py auto-eval --data_dir dataset --output_dir outputs --max_f
 
 ---
 
-### 第三步（可选）：启用 LLM 二次评估
+### 第三步（可选）：启用 LLM 二次评估（保留两种方法）
 
-先配置环境变量（OpenAI 兼容接口）：
+本项目同时支持两种 LLM 后端，均使用同一条运行命令：
 
 ```bash
+python run_pipeline.py auto-eval --data_dir dataset --output_dir outputs --use_llm --llm_only --max_frames 64 --export_keyframes 8
+```
+
+#### 方法 A：云端 API（OpenAI 兼容）
+
+```bash
+set LLM_BACKEND=api
 set LLM_API_KEY=你的key
 set LLM_BASE_URL=https://api.openai.com/v1
-set LLM_MODEL=gpt-4.1-mini
+set LLM_MODEL=gpt-4o-mini
+set LLM_MAX_IMAGES=24
+set LLM_IMAGE_DETAIL=low
 ```
 
-然后执行：
+#### 方法 B：本地部署模型（Ollama）
+
+1. 安装并启动 Ollama（默认地址 `http://127.0.0.1:11434`）
+2. 拉取视觉模型，例如：
 
 ```bash
-python run_pipeline.py auto-eval --data_dir dataset --output_dir outputs --use_llm
+ollama pull qwen2.5vl:7b
 ```
 
-会额外输出：
+3. 配置环境变量：
+
+```bash
+set LLM_BACKEND=ollama
+set OLLAMA_BASE_URL=http://127.0.0.1:11434
+set OLLAMA_MODEL=qwen2.5vl:7b
+set LLM_MAX_IMAGES=24
+```
+
+执行后会额外输出：
 - `outputs/auto_eval_llm.csv`
 
 提示词模板在：
@@ -200,10 +221,13 @@ python run_pipeline.py analyze --auto_csv outputs/auto_eval_rule.csv --human_csv
 ### 5.4 LLM 二次评估（llm_eval.py）
 
 流程：
-1. 导出关键帧拼图（raw/det/gen）
-2. 把规则分数 + 关键帧路径 + 元信息拼成 JSON
-3. 注入 `prompts/llm_safety_prompt.md`
-4. 请求 LLM，要求仅返回 JSON
+1. 导出关键帧拼图（raw/det/gen），每张图内部是 6 方位镜头横向拼接并带 `cam0..cam5` 标注。
+2. 构造时序图像序列：`[raw_t, det_t, gen_t]`，`t` 从小到大。
+3. 将图片编码为 base64，并与结构化元信息一起发送给 LLM。
+4. 注入 `prompts/llm_safety_prompt.md`，要求模型输出严格 JSON。
+5. 兼容两类后端：
+  - API（OpenAI 兼容 chat/completions）
+  - 本地 Ollama（`/api/chat`）
 
 作用：
 - 提供“可解释语义判断”，补足纯规则法在复杂语义下的盲区
@@ -281,6 +305,21 @@ python run_pipeline.py analyze --auto_csv outputs/auto_eval_rule.csv --human_csv
 1. 这版是“课程作业可运行 baseline”，重点是流程完整、可解释、可扩展。
 2. 若数据分辨率很高，建议先降低 `max_frames` 或预缩放以提高速度。
 3. LLM 评估成本取决于样本量与 prompt 长度，建议先小样本验证。
+
+---
+
+## 9. 本地开源模型推荐
+
+优先推荐（按性价比）：
+
+1. `qwen2.5vl:7b`（Ollama）
+  - 免费开源，部署简单，中文理解较好，适合课程项目基线。
+2. `minicpm-v:8b`（Ollama）
+  - 多模态能力强，细节描述较稳定。
+3. `llava:7b`（Ollama）
+  - 生态成熟，速度快，但复杂交通语义能力略弱于前两者。
+
+建议先用 `qwen2.5vl:7b` 跑全量，再抽样用云端模型复核边界样本。
 
 ---
 
