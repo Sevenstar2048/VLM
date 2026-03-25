@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
-from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Optional
 
 import requests
-
-from .rule_eval import VideoSafetyResult
 
 
 class LLMSafetyEvaluator:
@@ -26,6 +24,8 @@ class LLMSafetyEvaluator:
         self.api_key = os.getenv("LLM_API_KEY", "").strip()
         self.base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.model = os.getenv("LLM_MODEL", "gpt-4.1-mini")
+        self.max_images = int(os.getenv("LLM_MAX_IMAGES", "24"))
+        self.image_detail = os.getenv("LLM_IMAGE_DETAIL", "low")
 
         template = Path(prompt_template_path).read_text(encoding="utf-8")
         self.template = template
@@ -33,45 +33,117 @@ class LLMSafetyEvaluator:
     def is_enabled(self) -> bool:
         return bool(self.api_key)
 
+    @staticmethod
+    def _encode_image_base64(image_path: str) -> str:
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+
+    @staticmethod
+    def _guess_mime(image_path: str) -> str:
+        suffix = Path(image_path).suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            return "image/jpeg"
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".webp":
+            return "image/webp"
+        return "image/jpeg"
+
+    def _ordered_image_paths(self, keyframes: Dict[str, list[str]]) -> list[str]:
+        raw = keyframes.get("raw", [])
+        det = keyframes.get("det", [])
+        gen = keyframes.get("gen", [])
+        count = min(len(raw), len(det), len(gen))
+
+        ordered: list[str] = []
+        for i in range(count):
+            # 按时间顺序组织: raw(i) -> det(i) -> gen(i)
+            ordered.extend([raw[i], det[i], gen[i]])
+
+        return ordered[: self.max_images]
+
     def _build_prompt(
         self,
-        rule_result: VideoSafetyResult,
+        video_path: str,
         keyframes: Dict[str, list[str]],
+        rule_context: Optional[Dict[str, object]] = None,
     ) -> str:
         payload = {
-            "video_path": rule_result.video_path,
-            "rule_result": asdict(rule_result),
-            "keyframes": keyframes,
+            "video_path": video_path,
+            "multi_view_layout": {
+                "columns": 6,
+                "rows": 3,
+                "row_meaning": {
+                    "raw": "原始视频行",
+                    "det": "检测结果行",
+                    "gen": "生成视频行",
+                },
+                "camera_order": "每张图从左到右为 cam0..cam5，方位顺序在同一数据集内固定",
+            },
+            "frame_groups": {
+                "raw": len(keyframes.get("raw", [])),
+                "det": len(keyframes.get("det", [])),
+                "gen": len(keyframes.get("gen", [])),
+            },
+            "image_order": "按时间顺序重复 [raw_t, det_t, gen_t]",
+            "rule_context": rule_context or {},
         }
         return self.template.replace("{{PAYLOAD_JSON}}", json.dumps(payload, ensure_ascii=False, indent=2))
 
     def evaluate(
         self,
-        rule_result: VideoSafetyResult,
+        video_path: str,
         keyframes: Dict[str, list[str]],
+        rule_context: Optional[Dict[str, object]] = None,
         timeout: int = 60,
     ) -> Optional[Dict[str, object]]:
         if not self.is_enabled():
             return None
 
-        prompt = self._build_prompt(rule_result, keyframes)
+        ordered_images = self._ordered_image_paths(keyframes)
+        if not ordered_images:
+            return {
+                "semantic_unsafe": 0,
+                "logical_unsafe": 0,
+                "decision_unsafe": 0,
+                "unsafe": 0,
+                "confidence": 0.0,
+                "reason": "未找到可用关键帧",
+            }
+
+        prompt = self._build_prompt(video_path, keyframes, rule_context=rule_context)
         url = f"{self.base_url}/chat/completions"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+        user_content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
+        for image_path in ordered_images:
+            encoded = self._encode_image_base64(image_path)
+            mime = self._guess_mime(image_path)
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{encoded}",
+                        "detail": self.image_detail,
+                    },
+                }
+            )
+
         body = {
             "model": self.model,
             "temperature": 0.0,
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是自动驾驶视频安全评测专家，只输出有效JSON。",
+                    "content": "你是自动驾驶视频安全评测专家。你将收到按时间排序的多帧图像，只输出有效JSON。",
                 },
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": user_content,
                 },
             ],
         }

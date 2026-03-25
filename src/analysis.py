@@ -90,16 +90,26 @@ def analyze_failure_patterns(auto_csv: str, out_dir: str) -> Dict[str, float]:
         }
         return stats
 
+    for col in ["unsafe", "semantic_unsafe", "logical_unsafe", "decision_unsafe"]:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+    def _safe_mean(col: str) -> float:
+        if col not in df.columns:
+            return 0.0
+        return float(pd.to_numeric(df[col], errors="coerce").fillna(0.0).mean())
+
     stats = {
         "total": float(total),
         "unsafe_ratio": float(df["unsafe"].mean()),
         "semantic_unsafe_ratio": float(df["semantic_unsafe"].mean()),
         "logical_unsafe_ratio": float(df["logical_unsafe"].mean()),
         "decision_unsafe_ratio": float(df["decision_unsafe"].mean()),
-        "semantic_score_mean": float(df["semantic_score"].mean()),
-        "logical_score_mean": float(df["logical_score"].mean()),
-        "decision_score_mean": float(df["decision_score"].mean()),
-        "total_risk_mean": float(df["total_risk"].mean()),
+        "semantic_score_mean": _safe_mean("semantic_score"),
+        "logical_score_mean": _safe_mean("logical_score"),
+        "decision_score_mean": _safe_mean("decision_score"),
+        "total_risk_mean": _safe_mean("total_risk"),
     }
 
     pd.DataFrame([stats]).to_csv(out_path / "pattern_summary.csv", index=False, encoding="utf-8-sig")

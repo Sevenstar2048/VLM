@@ -29,12 +29,15 @@ def cmd_auto_eval(args: argparse.Namespace) -> None:
     if not videos:
         raise RuntimeError(f"在 {args.data_dir} 下没有找到视频文件")
 
+    if args.llm_only and not args.use_llm:
+        raise RuntimeError("启用 --llm_only 时必须同时设置 --use_llm")
+
     ensure_dir(args.output_dir)
     keyframe_dir = str(Path(args.output_dir) / "keyframes")
     ensure_dir(keyframe_dir)
 
     parser = MultiViewGridParser(rows=3, cols=6)
-    evaluator = RuleBasedSafetyEvaluator(front_camera_ids=args.front_cameras)
+    evaluator = None if args.llm_only else RuleBasedSafetyEvaluator(front_camera_ids=args.front_cameras)
 
     llm = None
     if args.use_llm:
@@ -48,16 +51,26 @@ def cmd_auto_eval(args: argparse.Namespace) -> None:
 
     for video in tqdm(videos, desc="Auto evaluating"):
         sampled = parser.sample_video(video, max_frames=args.max_frames)
-        rule_result = evaluator.evaluate(sampled)
+        rule_result = evaluator.evaluate(sampled) if evaluator is not None else None
         keyframes = write_keyframes(sampled, keyframe_dir, max_export=args.export_keyframes)
 
-        row = asdict(rule_result)
-        row.update(rule_result.details)
-        all_rows.append(row)
+        if rule_result is not None:
+            row = asdict(rule_result)
+            row.update(rule_result.details)
+            all_rows.append(row)
 
         if llm is not None:
             try:
-                llm_result = llm.evaluate(rule_result, keyframes)
+                rule_context: dict[str, object] | None = None
+                if rule_result is not None:
+                    rule_context = {
+                        "semantic_score": rule_result.semantic_score,
+                        "logical_score": rule_result.logical_score,
+                        "decision_score": rule_result.decision_score,
+                        "total_risk": rule_result.total_risk,
+                    }
+
+                llm_result = llm.evaluate(video_path=video, keyframes=keyframes, rule_context=rule_context)
                 if llm_result is not None:
                     llm_rows.append(
                         {
@@ -68,9 +81,10 @@ def cmd_auto_eval(args: argparse.Namespace) -> None:
             except Exception as e:
                 llm_rows.append({"video_path": video, "error": str(e)})
 
-    auto_csv = str(Path(args.output_dir) / "auto_eval_rule.csv")
-    pd.DataFrame(all_rows).to_csv(auto_csv, index=False, encoding="utf-8-sig")
-    print(f"[OK] 规则评估结果: {auto_csv}")
+    if all_rows:
+        auto_csv = str(Path(args.output_dir) / "auto_eval_rule.csv")
+        pd.DataFrame(all_rows).to_csv(auto_csv, index=False, encoding="utf-8-sig")
+        print(f"[OK] 规则评估结果: {auto_csv}")
 
     if llm_rows:
         llm_csv = str(Path(args.output_dir) / "auto_eval_llm.csv")
@@ -108,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--export_keyframes", type=int, default=8, help="每条视频导出的关键帧数量")
     p_auto.add_argument("--front_cameras", type=int, nargs="+", default=[2, 3], help="前向摄像头ID")
     p_auto.add_argument("--use_llm", action="store_true", help="启用LLM二次评估")
+    p_auto.add_argument("--llm_only", action="store_true", help="仅使用LLM评估，跳过规则法")
     p_auto.add_argument("--prompt_template", type=str, default="prompts/llm_safety_prompt.md")
     p_auto.set_defaults(func=cmd_auto_eval)
 
