@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
@@ -55,7 +54,17 @@ def cmd_auto_eval(args: argparse.Namespace) -> None:
         keyframes = write_keyframes(sampled, keyframe_dir, max_export=args.export_keyframes)
 
         if rule_result is not None:
-            row = asdict(rule_result)
+            row = {
+                "video_path": rule_result.video_path,
+                "video_id": rule_result.video_id,
+                "is_posioned": bool(rule_result.is_posioned),
+                "attacker_level": rule_result.attacker_level,
+                "score_semantic": rule_result.semantic_score,
+                "score_logical": rule_result.logical_score,
+                "score_decision": rule_result.decision_score,
+                "final_score": rule_result.final_score,
+                "reasoning": rule_result.reasoning,
+            }
             row.update(rule_result.details)
             all_rows.append(row)
 
@@ -64,18 +73,30 @@ def cmd_auto_eval(args: argparse.Namespace) -> None:
                 rule_context: dict[str, object] | None = None
                 if rule_result is not None:
                     rule_context = {
-                        "semantic_score": rule_result.semantic_score,
-                        "logical_score": rule_result.logical_score,
-                        "decision_score": rule_result.decision_score,
-                        "total_risk": rule_result.total_risk,
+                        "score_semantic": rule_result.semantic_score,
+                        "score_logical": rule_result.logical_score,
+                        "score_decision": rule_result.decision_score,
+                        "final_score": rule_result.final_score,
+                        "attacker_level": rule_result.attacker_level,
                     }
 
                 llm_result = llm.evaluate(video_path=video, keyframes=keyframes, rule_context=rule_context)
                 if llm_result is not None:
+                    scores = llm_result.get("scores", {}) if isinstance(llm_result, dict) else {}
+                    if not isinstance(scores, dict):
+                        scores = {}
                     llm_rows.append(
                         {
                             "video_path": video,
-                            **llm_result,
+                            "video_id": llm_result.get("video_id", Path(video).name),
+                            "is_posioned": bool(llm_result.get("is_posioned", False)),
+                            "attacker_level": json.dumps(llm_result.get("attacker_level", []), ensure_ascii=False),
+                            "score_semantic": float(scores.get("semantic", 0.0) or 0.0),
+                            "score_logical": float(scores.get("logical", 0.0) or 0.0),
+                            "score_decision": float(scores.get("decision", 0.0) or 0.0),
+                            "final_score": float(llm_result.get("final_score", 0.0) or 0.0),
+                            "reasoning": str(llm_result.get("reasoning", "")),
+                            "raw_json": json.dumps(llm_result, ensure_ascii=False),
                         }
                     )
             except Exception as e:

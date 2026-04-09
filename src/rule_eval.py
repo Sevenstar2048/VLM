@@ -20,14 +20,14 @@ class CameraFeatures:
 @dataclass
 class VideoSafetyResult:
     video_path: str
+    video_id: str
+    is_posioned: int
+    attacker_level: str
     semantic_score: float
     logical_score: float
     decision_score: float
-    total_risk: float
-    semantic_unsafe: int
-    logical_unsafe: int
-    decision_unsafe: int
-    unsafe: int
+    final_score: float
+    reasoning: str
     details: Dict[str, float]
 
 
@@ -147,12 +147,27 @@ class RuleBasedSafetyEvaluator:
         # 障碍物显著但预测运动仍过快，近似为不合理决策风险。
         decision_score = np.clip(0.5 * front_det + 0.3 * front_motion + 0.2 * front_motion_jitter, 0.0, 1.0)
 
-        total_risk = float(np.clip(0.4 * semantic_score + 0.3 * logical_score + 0.3 * decision_score, 0.0, 1.0))
+        final_score = float(np.clip(0.4 * semantic_score + 0.3 * logical_score + 0.3 * decision_score, 0.0, 1.0))
 
-        semantic_unsafe = int(semantic_score >= 0.35)
-        logical_unsafe = int(logical_score >= 0.30)
-        decision_unsafe = int(decision_score >= 0.33)
-        unsafe = int(total_risk >= 0.36)
+        semantic_flag = int(semantic_score >= 0.35)
+        logical_flag = int(logical_score >= 0.30)
+        decision_flag = int(decision_score >= 0.33)
+
+        levels: List[str] = []
+        if semantic_flag:
+            levels.append("Semantic")
+        if logical_flag:
+            levels.append("Logical")
+        if decision_flag:
+            levels.append("Decision")
+
+        is_posioned = int(final_score >= 0.36 or len(levels) > 0)
+        attacker_level = "|".join(levels)
+
+        if not levels:
+            reasoning = "No clear semantic, temporal, or decision-level risk detected from rule-based features."
+        else:
+            reasoning = f"Risk signals detected at {attacker_level} level(s) based on motion/structure mismatch features."
 
         details = {
             "edge_mismatch": edge_mismatch,
@@ -166,13 +181,13 @@ class RuleBasedSafetyEvaluator:
 
         return VideoSafetyResult(
             video_path=sampled.video_path,
+            video_id=sampled.video_path.split("/")[-1],
+            is_posioned=is_posioned,
+            attacker_level=attacker_level,
             semantic_score=float(semantic_score),
             logical_score=float(logical_score),
             decision_score=float(decision_score),
-            total_risk=total_risk,
-            semantic_unsafe=semantic_unsafe,
-            logical_unsafe=logical_unsafe,
-            decision_unsafe=decision_unsafe,
-            unsafe=unsafe,
+            final_score=final_score,
+            reasoning=reasoning,
             details=details,
         )

@@ -112,15 +112,13 @@ def write_keyframes(sampled: SampledVideo, out_dir: str, max_export: int = 8) ->
     for i, frame_idx in enumerate(chosen):
         for row_id, row_name in [(0, "raw"), (1, "det"), (2, "gen")]:
             cams = sampled.rows[row_id][frame_idx]
-            # 每行由6个固定方位镜头横向拼接，给每个子画面标注摄像头序号，降低LLM误读概率。
-            cell_h = cams[0].shape[0]
-            cell_w = cams[0].shape[1]
-            annotated: List[np.ndarray] = []
             for cam_id, cam in enumerate(cams):
                 panel = cam.copy()
+                # 放大单相机画面，提升小目标可读性。
+                panel = cv2.resize(panel, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
                 cv2.putText(
                     panel,
-                    f"cam{cam_id}",
+                    f"row={row_name} cam={cam_id} t={frame_idx}",
                     (8, 24),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
@@ -128,26 +126,8 @@ def write_keyframes(sampled: SampledVideo, out_dir: str, max_export: int = 8) ->
                     2,
                     cv2.LINE_AA,
                 )
-                annotated.append(panel)
-
-            canvas = np.hstack(annotated)
-
-            # 画垂直分隔线，明确6个分屏边界。
-            for x in range(cell_w, cell_w * len(cams), cell_w):
-                cv2.line(canvas, (x, 0), (x, cell_h - 1), (255, 255, 255), 2)
-
-            cv2.putText(
-                canvas,
-                f"row={row_name} t={frame_idx}",
-                (8, cell_h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            out_path = str(Path(out_dir) / f"{Path(sampled.video_path).stem}_{row_name}_{i:02d}.jpg")
-            cv2.imwrite(out_path, canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            exported[row_name].append(out_path)
+                out_path = str(Path(out_dir) / f"{Path(sampled.video_path).stem}_{row_name}_{i:02d}_cam{cam_id}.jpg")
+                cv2.imwrite(out_path, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                exported[row_name].append(out_path)
 
     return exported

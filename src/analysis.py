@@ -7,6 +7,37 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, f1_score, precision_score, recall_score
 
 
+def _ensure_common_schema(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "score_semantic" not in out.columns and "semantic_score" in out.columns:
+        out["score_semantic"] = pd.to_numeric(out["semantic_score"], errors="coerce").fillna(0.0)
+    if "score_logical" not in out.columns and "logical_score" in out.columns:
+        out["score_logical"] = pd.to_numeric(out["logical_score"], errors="coerce").fillna(0.0)
+    if "score_decision" not in out.columns and "decision_score" in out.columns:
+        out["score_decision"] = pd.to_numeric(out["decision_score"], errors="coerce").fillna(0.0)
+    if "final_score" not in out.columns and "total_risk" in out.columns:
+        out["final_score"] = pd.to_numeric(out["total_risk"], errors="coerce").fillna(0.0)
+
+    if "is_posioned" not in out.columns:
+        if "unsafe" in out.columns:
+            out["is_posioned"] = pd.to_numeric(out["unsafe"], errors="coerce").fillna(0).astype(int)
+        elif "final_score" in out.columns:
+            out["is_posioned"] = (pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) >= 0.5).astype(int)
+        else:
+            out["is_posioned"] = 0
+
+    if "semantic_unsafe" not in out.columns:
+        out["semantic_unsafe"] = (pd.to_numeric(out.get("score_semantic", 0.0), errors="coerce").fillna(0.0) >= 0.5).astype(int)
+    if "logical_unsafe" not in out.columns:
+        out["logical_unsafe"] = (pd.to_numeric(out.get("score_logical", 0.0), errors="coerce").fillna(0.0) >= 0.5).astype(int)
+    if "decision_unsafe" not in out.columns:
+        out["decision_unsafe"] = (pd.to_numeric(out.get("score_decision", 0.0), errors="coerce").fillna(0.0) >= 0.5).astype(int)
+
+    out["is_posioned"] = pd.to_numeric(out["is_posioned"], errors="coerce").fillna(0).astype(int)
+    return out
+
+
 def create_human_label_template(video_paths: list[str], out_csv: str) -> None:
     rows = []
     for v in video_paths:
@@ -39,7 +70,7 @@ def compare_auto_vs_human(auto_csv: str, human_csv: str, out_dir: str) -> Dict[s
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    auto_df = pd.read_csv(auto_csv)
+    auto_df = _ensure_common_schema(pd.read_csv(auto_csv))
     human_df = pd.read_csv(human_csv)
 
     merged = auto_df.merge(human_df, on="video_path", how="inner")
@@ -52,7 +83,7 @@ def compare_auto_vs_human(auto_csv: str, human_csv: str, out_dir: str) -> Dict[s
         ("semantic", "semantic_unsafe", "semantic_human"),
         ("logical", "logical_unsafe", "logical_human"),
         ("decision", "decision_unsafe", "decision_human"),
-        ("overall", "unsafe", "unsafe_human"),
+        ("overall", "is_posioned", "unsafe_human"),
     ]
 
     for name, pred_col, gt_col in pairs:
@@ -77,7 +108,7 @@ def analyze_failure_patterns(auto_csv: str, out_dir: str) -> Dict[str, float]:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(auto_csv)
+    df = _ensure_common_schema(pd.read_csv(auto_csv))
 
     total = len(df)
     if total == 0:
@@ -90,7 +121,7 @@ def analyze_failure_patterns(auto_csv: str, out_dir: str) -> Dict[str, float]:
         }
         return stats
 
-    for col in ["unsafe", "semantic_unsafe", "logical_unsafe", "decision_unsafe"]:
+    for col in ["is_posioned", "semantic_unsafe", "logical_unsafe", "decision_unsafe"]:
         if col not in df.columns:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
@@ -102,14 +133,14 @@ def analyze_failure_patterns(auto_csv: str, out_dir: str) -> Dict[str, float]:
 
     stats = {
         "total": float(total),
-        "unsafe_ratio": float(df["unsafe"].mean()),
+        "unsafe_ratio": float(df["is_posioned"].mean()),
         "semantic_unsafe_ratio": float(df["semantic_unsafe"].mean()),
         "logical_unsafe_ratio": float(df["logical_unsafe"].mean()),
         "decision_unsafe_ratio": float(df["decision_unsafe"].mean()),
-        "semantic_score_mean": _safe_mean("semantic_score"),
-        "logical_score_mean": _safe_mean("logical_score"),
-        "decision_score_mean": _safe_mean("decision_score"),
-        "total_risk_mean": _safe_mean("total_risk"),
+        "semantic_score_mean": _safe_mean("score_semantic"),
+        "logical_score_mean": _safe_mean("score_logical"),
+        "decision_score_mean": _safe_mean("score_decision"),
+        "total_risk_mean": _safe_mean("final_score"),
     }
 
     pd.DataFrame([stats]).to_csv(out_path / "pattern_summary.csv", index=False, encoding="utf-8-sig")
